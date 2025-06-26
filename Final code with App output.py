@@ -1,161 +1,167 @@
-import cv2
+# #7565910815:AAHSAT6AtHwhBdcqtLdvrIAjhI_6ZRrKRUc
+
 import os
+import cv2
 import pytesseract
+from gtts import gTTS
 from ultralytics import YOLO
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+import logging
 import matplotlib.pyplot as plt
 
 # Paths
 model_path = "best_30_epochs.pt"  # Update this to your local model path
-input_image_path = "D:\Detection-and-recognition-of-multi-column-text-in-Hindi-newspaper--main\H1.jpg"  # Update this to your image path
 output_dir = "cropped_boxes"
 
-# Load the YOLO model
+# Initialize YOLO model
 model = YOLO(model_path)
 
-# Create a directory to save cropped images
-os.makedirs(output_dir, exist_ok=True)
+# Set up logging for the bot
+logging.basicConfig(level=logging.INFO)
 
-# Perform inference on an image
-results = model(input_image_path)
+# Define language choices for the bot
+def set_language(update: Update, context: CallbackContext) -> None:
+    reply_keyboard = [['English', 'Hindi']]
+    update.message.reply_text(
+        "Please choose the language of the newspaper:",
+        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True),
+    )
 
-# Get the original image for cropping
-original_image = cv2.imread(input_image_path)
+# Handle the user’s language choice
+def handle_language_choice(update: Update, context: CallbackContext) -> None:
+    choice = update.message.text.lower()
+    
+    if choice in ['english', 'hindi']:
+        context.user_data['language'] = choice
+        update.message.reply_text(f"Great! You've selected {choice.title()}. Now, please upload the newspaper image as a file for better results.")
+    else:
+        update.message.reply_text("Invalid choice. Please select either 'English' or 'Hindi'.")
 
-# Loop over the detected objects
-total_boxes = len(results[0].boxes.xyxy)
-print(f"Total boxes detected: {total_boxes}")
+# Define the start function for the bot
+def start(update: Update, context: CallbackContext) -> None:
+    update.message.reply_text(
+        "Hi! Send me an image of a newspaper, and I'll process it. "
+        "For better reading results, please upload the image as a file instead of a photo. "
+        "To start, please set the language of the newspaper by using the /setlanguage command."
+    )
 
-for i, box in enumerate(results[0].boxes.xyxy):
-    print(f"Processing box {i}...")  # Debugging statement
+# Define the image handler for processing images sent as a photo
+def handle_image(update: Update, context: CallbackContext) -> None:
+    if 'language' not in context.user_data:
+        update.message.reply_text("Please choose the newspaper language first by using /setlanguage.")
+        return
+    
+    # Get the image from the user (for photo type)
+    image = update.message.photo[-1].get_file()
+    input_image_path = os.path.join(output_dir, "input_image.jpg")
+    image.download(input_image_path)
+    
+    process_image(update, context, input_image_path)
 
-    x1, y1, x2, y2 = map(int, box)
-    confidence = results[0].boxes.conf[i]  # Get confidence score
-    class_id = results[0].boxes.cls[i]  # Get class ID
+# Define the document handler for processing images sent as a file
+def handle_document(update: Update, context: CallbackContext) -> None:
+    if 'language' not in context.user_data:
+        update.message.reply_text("Please choose the newspaper language first by using /setlanguage.")
+        return
+    
+    # Get the file if it's an image
+    file = update.message.document
+    if file.mime_type.startswith("image/"):
+        input_image_path = os.path.join(output_dir, file.file_name)
+        file = file.get_file()
+        file.download(input_image_path)
+        
+        process_image(update, context, input_image_path)
+    else:
+        update.message.reply_text("Please upload a valid image file.")
 
-    if confidence > 0.1:  # Threshold for confidence
-        # Crop the image using the bounding box coordinates
-        cropped_img = original_image[y1:y2, x1:x2]
+# Function to process images based on language choice
+def process_image(update: Update, context: CallbackContext, input_image_path: str) -> None:
+    try:
+        # Perform inference using YOLO
+        results = model(input_image_path)
+        original_image = cv2.imread(input_image_path)
 
-        # Save the cropped image
-        output_path = os.path.join(output_dir, f"box_{i}.jpg")
-        cv2.imwrite(output_path, cropped_img)
+        extracted_texts = []
+        selected_language = context.user_data.get('language', 'hindi')  # Default to Hindi if not set
 
-        # Perform OCR on the cropped image
-        text = pytesseract.image_to_string(cropped_img)
+        for i, box in enumerate(results[0].boxes.xyxy):
+            try:
+                x1, y1, x2, y2 = map(int, box)
+                confidence = results[0].boxes.conf[i]
+                class_id = int(results[0].boxes.cls[i])  # Get class id of the detected object
+                class_name = model.names[class_id]  # Get the class name
 
-        # Clean up the extracted text
-        cleaned_text = "\n".join(line.strip().replace(":", "") for line in text.splitlines() if line.strip())
+                if confidence > 0.1 and class_name == 'news':  # Only process if it's a 'news' box
+                    # Crop the image
+                    cropped_img = original_image[y1:y2, x1:x2]
+                    cropped_img_path = os.path.join(output_dir, f"cropped_box_{i}.jpg")
+                    cv2.imwrite(cropped_img_path, cropped_img)
 
-        # Display the cropped image using OpenCV
-        cv2.imshow(f'Box {i}', cropped_img)
-        cv2.waitKey(1000)  # Wait for 1 second (1000 milliseconds) before closing the window
+                    # Send the cropped image and class information back to the user
+                    context.bot.send_photo(chat_id=update.message.chat_id, photo=open(cropped_img_path, 'rb'))
+                    update.message.reply_text(f"Processing detected news article")
 
-        # Print the cleaned extracted text
-        print(f"Text from box {i}:")
-        print(cleaned_text)
-        print()  # Print a newline for better readability
+                    # OCR and text extraction based on the chosen language
+                    cropped_img_rgb = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2RGB)
+                    
+                    if selected_language == 'english':
+                        text = pytesseract.image_to_string(cropped_img_rgb, lang='eng')
+                    else:  # Hindi
+                        text = pytesseract.image_to_string(cropped_img_rgb, lang='hin')
 
-cv2.destroyAllWindows()  # Close all OpenCV windows
+                    cleaned_text = "\n".join(line.strip().replace(":", "") for line in text.splitlines() if line.strip())
+                    extracted_texts.append(cleaned_text)
 
-# Collect the number of characters (or words) from each box's OCR result for the bar chart
-box_indices = []
-text_lengths = []
+                    # Convert text to audio and send back based on the chosen language
+                    if cleaned_text.strip():
+                        audio_file = os.path.join(output_dir, f"output_box_{i}.mp3")
+                        if selected_language == 'english':
+                            tts = gTTS(text=cleaned_text, lang='en')
+                        else:  # Hindi
+                            tts = gTTS(text=cleaned_text, lang='hi')
+                        
+                        tts.save(audio_file)
+                        context.bot.send_audio(chat_id=update.message.chat_id, audio=open(audio_file, 'rb'))
 
-for i, box in enumerate(results[0].boxes.xyxy):
-    x1, y1, x2, y2 = map(int, box)
-    confidence = results[0].boxes.conf[i]
-    if confidence > 0.1:
-        cropped_img = original_image[y1:y2, x1:x2]
-        text = pytesseract.image_to_string(cropped_img)
-        cleaned_text = "\n".join(line.strip().replace(":", "") for line in text.splitlines() if line.strip())
-        box_indices.append(f'Box {i}')
-        text_lengths.append(len(cleaned_text))  # Or use len(cleaned_text.split()) for word count
+            except Exception as e:
+                print(f"Error processing box {i}: {e}")
 
-# Plot vertical bar chart
-plt.figure(figsize=(10, 6))
-plt.bar(box_indices, text_lengths)
-plt.xlabel('Box Index')
-plt.ylabel('Text Length (characters)')
-plt.title('Text Length per Detected Box')
-plt.xticks(rotation=45)
-plt.tight_layout()
+    except Exception as e:
+        print(f"Error processing image: {e}")
+        update.message.reply_text("There was an error processing the image.")
 
-# Save the chart in the results directory
-chart_path = os.path.join("results", "vertical_bar_chart.png")
-os.makedirs("results", exist_ok=True)
-plt.savefig(chart_path)
-plt.close()
-print(f"Bar chart saved to {chart_path}")
-
-# Example values for precision, recall, and mAP (replace with your actual values)
-precision = 0.92
-recall = 0.892
-mAP = 0.867
-
-# Plot comparison bar graph of precision, recall, and mAP
-metrics = ['Precision', 'Recall', 'mAP']
-values = [precision, recall, mAP]
-
-plt.figure(figsize=(6, 4))
-plt.bar(metrics, values, color=['skyblue', 'lightgreen', 'salmon'])
-plt.ylim(0, 1)
-plt.ylabel('Score')
-plt.title('Comparison of Precision, Recall & mAP')
-plt.tight_layout()
-
-comparison_chart_path = os.path.join("results", "comparison_bar_chart.png")
-plt.savefig(comparison_chart_path)
-plt.close()
-print(f"Comparison bar chart saved to {comparison_chart_path}")
-# Plot and save histogram graph of text lengths
-plt.figure(figsize=(8, 5))
-plt.hist(text_lengths, bins=10, color='purple', edgecolor='black')
-plt.xlabel('Text Length (characters)')
-plt.ylabel('Frequency')
-plt.title('Histogram of Text Lengths per Detected Box')
-plt.tight_layout()
-
-histogram_path = os.path.join("results", "text_length_histogram.png")
-plt.savefig(histogram_path)
-plt.close()
-print(f"Histogram saved to {histogram_path}")
-
-import matplotlib.pyplot as plt
-
-# Sample data (replace this with your actual data)
-epochs = list(range(190))  # Example for 190 epochs
-val_box_loss = [0.55, 0.70, 0.56, 0.52, 0.50, 0.48, 0.46, 0.45, 0.44, 0.43] + [0.42 - i*0.0001 for i in range(180)]  # Replace with real values
-
-# Plot
-plt.figure(figsize=(10, 5))
-plt.plot(epochs, val_box_loss, label='val/box_loss')
-plt.xlabel("Epoch")
-plt.ylabel("val/box_loss")
-plt.title("val/box_loss Over Epochs")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
+# Save and display the classified image
+output_classified_path = os.path.join(output_dir, "classified_news.jpg")
+cv2.imwrite(output_classified_path, 'input_image_path')
+plt.figure(figsize=(10, 8))
+# plt.imshow(cv2.cvtColor('input_image_path', cv2.COLOR_BGR2RGB))
+plt.axis("off")
 plt.show()
 
-import matplotlib.pyplot as plt
+print("Classified Results:", classified_results)
 
-# Sample data (replace these with your actual data)
-epochs = list(range(190))
-map_50 = [0.3 + 0.005 * min(i, 100) for i in epochs]  # Fake smooth increase
-precision = [0.5 + 0.004 * min(i, 100) - 0.02*(i > 120) for i in epochs]  # Fake values
-recall = [0.1 + 0.006 * min(i, 100) + 0.01*(i > 100) for i in epochs]  # Fake values
+# Main function to set up the bot
+def main() -> None:
+    # Your Telegram Bot API Token
+    TELEGRAM_BOT_TOKEN = '7565910815:AAHSAT6AtHwhBdcqtLdvrIAjhI_6ZRrKRUc'  # Replace with your actual token
 
-# Plotting
-plt.figure(figsize=(12, 6))
-plt.plot(epochs, map_50, 'o-', label='mAP@0.5')            # blue circle line
-plt.plot(epochs, precision, 'x--', label='Precision')       # orange cross dashed
-plt.plot(epochs, recall, 's:', label='Recall')              # green square dotted
+    # Set up the bot
+    updater = Updater(TELEGRAM_BOT_TOKEN)
 
-# Formatting
-plt.xlabel("Epoch")
-plt.ylabel("Value")
-plt.title("mAP, Precision, and Recall Comparison")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.show()
+    # Register handlers
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("setlanguage", set_language))
+    dp.add_handler(MessageHandler(Filters.text & Filters.regex('^(English|Hindi)$'), handle_language_choice))
+    dp.add_handler(MessageHandler(Filters.photo, handle_image))
+    dp.add_handler(MessageHandler(Filters.document.category("image"), handle_document))
+
+    # Start the Bot
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == '__main__':
+    os.makedirs(output_dir, exist_ok=True)
+    main()
