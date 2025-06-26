@@ -1,5 +1,9 @@
 Procedure
 
+Run the file "Final code" in Python Supporting Software such as Studio Visio Code.
+
+CHANGE THE MODEL_PATH, INPUT_IMAGE_PATH AND OUTPUT_DIR.
+
 
 1.	Step 1: Search the Bot on Telegram
 	Open the Telegram app.
